@@ -1,3 +1,4 @@
+
 name: Build Hail with In-App Change and Restore
 
 on:
@@ -15,7 +16,7 @@ on:
           - custom
         default: random
       custom_package:
-        description: 'Only used when identity_mode is custom (e.g. com.tools.myapp)'
+        description: 'Only used when identity_mode is custom'
         type: string
         required: false
         default: ''
@@ -118,175 +119,85 @@ jobs:
           if changed == 0:
               raise SystemExit('No app_name resource could be updated')
 
-          details = {'app_name': app_name, 'package_id': package_id, 'mode': mode,
-                     'note': 'New package creates a separate app; data is not migrated.'}
+          details = {
+              'app_name': app_name,
+              'package_id': package_id,
+              'mode': mode,
+              'note': 'Build-time identity creates a separate installation.'
+          }
           Path('hail-build-identity.json').write_text(
               json.dumps(details, indent=2) + '\n', encoding='utf-8'
           )
           print('Application name:', app_name)
           print('Installed package:', package_id)
           print('Changed localized label resources:', changed)
-          print('Source Kotlin namespace deliberately unchanged for compatibility')
+          print('Source Kotlin namespace unchanged for compatibility')
           PY
 
       - name: Add on-device Change / Restore identity feature
         shell: bash
         run: |
           set -euo pipefail
-          python3 - <<'PY'
+          # Retrieve the identity-switch source from the previous
+          # successfully compiled commit and verify its checksum.
+          python3 - <<'PYINNER'
           import base64
+          import hashlib
           import io
+          import re
+          import urllib.request
           import zipfile
           from pathlib import Path
-          data = base64.b64decode(
-          "UEsDBBQAAAAIAMGNdV0cZ1fkLggAADMWAAAQAAAAYXBwbHlfZmVhdHVyZS5wea1YbXPbNhL+rl+BKDMlmcpQdbmZZtRT71w7"
-          "aTx501huvyQ5DkSCEiISYABQsuL6v3cXBKlXO25TzXhMgtj33Qe7ePyoXxndnwrZ53JJyrWdK/m00+12T8syXxMlT1K+FAkn"
-          "IuXSCrsmhZhpZoWSxCrCyEsmcrIc0MGA/kCSOU8WqrK005moSgNZolKglUQtuc7Zuk+EIblKWE5KrT7xxLodlLxhM2EWZPn0"
-          "B/oj+XX8+uQpsDNiJoWcdYzjZQjTnGTcgpSUGF4y0IODktM1+VXYl9WUnCaomHGaLZWAXSIHtWFPkjNRIC87Z5bYOV87bqwC"
-          "gzWwm3PNKdrdybQqSMnsPBdTIopSaUvG8Nrxz5+Mks2z5s2TmVdW5O3b2tR8roucGnaNf/jdNAy5SVjJO53L5+N3ZOT4h0BE"
-          "mZ4t3w8+RlRzo/IlDyMiMgI2tF8j8jMZEJ4b7qhoskrDqHM6mTy/mjSc4jgDu+N4iw0Fb4EnSJ8EPhRBp9NJeQY2lDlLeMyv"
-          "WWJDNLxHVJ72iOSrHkSnknY0iIYdAj9kC0Kc1n3nJLc85Rk4ET7gd5DJ0tjyaxtyCcEFp4+CymYnz4LI7ZawsaagjnsI0uov"
-          "YKokj0a10Foi/jQTYO0lrImCP9da6TALblD67ZDw6xKyCCJ446huiUqSSoOtmDAqIzfA/ZG+7ZEMPsMueevVcLqutLC8Vtar"
-          "5N0RNi6IeuTQjNpzBRMybDyjNMkw0etIUD3L1TQMngTRxg4wL6PCuOCEW+v4sxBbbje+zUCRHMpsCdqpsGYaHaHwcaXFIhU6"
-          "rF/M6EpXHPS+FsbGauFed4nrdAX/l+t/hVnPMwPD8CPUd+riHLCy7E8rkae0XqMLawK3Zzdr6q+9HRH1L3CGF2XOC9DM4UYI"
-          "hWXoXKSAKKwU03XJjImCb6L+IIO7yPv9Fk8SVUDWiCkY5/HmdPzKoQzXpDKQML9AkiTrM2YsGHsP0z2dukrP6NTRJo52OE3K"
-          "hbg++ZQuBs+UHA7os6fdKPAOfuxQ87QUgcH8BUCA/BXSYoEyD2GITvUSvLIcICznGaKlNJZBwD2j15OxMohfSi0MAVzNAdwA"
-          "YwHvjCEOg+BdpyeQGgDeEFAEXqgNtHaFqOcZASR6rUrwiJzl3ALEJ0xKZaFcQS9HlNKmEDEFWLIAP8oZ8OSG6yU3W9xc+uHH"
-          "J7Q2ij4hxmpYMa5QZKoBot8wKTJuLEWo7LS1hNWNu943EXC5aHTSx6rrL5TN4R8EtA/gYDXrz0H3Pu4BA4Anm3EN2brJqgfR"
-          "O4zuv5zMxZdqUW3oP26KtTyCf66iYL3cwr5NvUEgOEB+4KEfZNJaJkWZ9BesrzMlMzEL0GJzQLi1g56Ox68vzk6vLt69jS/O"
-          "9whQB9Mi2EME9u5Uy+dCEN3F/R6tgKsnp+B1WqcJf8sKvsWu3AZf4yvDcGtdgoweGDDRb0j6E//wQrMZliaGr7MXsmZz5+6Q"
-          "fSVcaBAad84s23L/w1y/Q3wU8B5A+EHesalp0eiFf3jTtGre7Uwm0O2gb7dlwpL4ogDK8nOxBB46BDjd3gDFnXF3op5BwzVT"
-          "eh0uoH8akW5SGasK8YV34QgR1h0aN+QKnYkeRZ+4gr/kdQsXXtJ6gbrdcUsfReQ2qqPVWBFXAjUNvqZr52Gqoofihvehutjv"
-          "tqK7qM0dfMODqB0TEJuVgD61exjjPbnQE4QH4YI8klAsaaj550pojm3tEjaEEfipC8602G6BKwB7sZOu66tbd4XdszmTM96s"
-          "EuSEBh2qIuAwcZpcwEMoCtj9O/RSLkNwydB3FVYdgP5kxcqX6HvsCN2pdA4trBalGwRGRFZ5flSGkme5SBa1mAM7zVytanXP"
-          "BcvV7IjB5HaH5zeGpa6cr4ele+Eb+QaP3EnK4CyEI9Odk9/s0hfQBZ6rlcwVS/95r9b6/z2vHs9J8PVSqMqM67w6xvRRo/LN"
-          "gcb3RerOaGWY3g5djtLsx+ySFzDbkEZRgt3t8TD9xVCdc+iG+GTFeflXI/WwaL3whj40Xocx2/3+92HyH0b0IGgGO+OHvfoM"
-          "crkyuHfEC/bPc5I4pEh/arpSId1J3d5MbKwyxLCM52t/7u22Gu0pXavS2z5xorZDv5pvIPTi3Ms2PTKt3PWBmyWgglPyynUm"
-          "vuFGsDVAxkmqQAvQkrb8XEZCWUpnC26HHW9+m1y59noKg3pla7h2/TEKKTiMZSkMmr5Hdryat01Xs9sqHWmsg7ZHaVnttz3o"
-          "PHENO9xY7mwLdcBqXkPUatQNP9Dwv0Pf2v1RiQ/0/f+7H7//Q/OEw6Sqm3ccBQREwb9HUdcHAvyH1VLLoqaawjjHimnKSDEk"
-          "e8L2upuAfE8KGENVVYaDCF6CLvSZZuvi4D/k3/cn1FvIGS5VNZsfCcQKMod8rqAMM4E55u61WlfnbK2qNgObOU7ITG1FAdU8"
-          "cePySduK4W1R7f2cTXkOu3GFIuibEOm3AxFRGMJDjGaMPsA+GtsSP84E7i7I0bjRyoRRfeLvbNqvt9arTv6o+7+6XPuNEAjN"
-          "A2rxTFV5SlzROcuyepSsbWqS1TurifVuR/xVNY62w3tUmAT11VnoVnrkBtJgGHz3uVL2p+DW50W0UyfH5ozHZOwn1k0bVZWg"
-          "E2cFgXKGWRpE+0vEQqVgME6ylXS3MlCSLj38vST1BSTQ3e6D9iNykwYnm0vTjDNbudke5vg8d8m0RX7a4ECbem2qmk16DiE1"
-          "5C7d+BXxx4bZvUz1l6ikvUQFu7avOQjeTbg7Lcia2AUjjskIWu84RjyJ42Do/YnXXZ0/AVBLAwQUAAAACADLjXVdnmgT1hMY"
-          "AAA/VAAASQAAAG92ZXJsYXkvYXBwL3NyYy9tYWluL2tvdGxpbi9jb20vYWlzdHJhL2hhaWwvaWRlbnRpdHkvSWRlbnRpdHlN"
-          "aWdyYXRpb24ua3S9PGtz27ay3/0rEE5OTSYy7KSn7TS9PrmKnaRq/LqW255O28nQIiQhpkiWDztqopn7H84/PL/k7i4AEnxJ"
-          "ctJz3akjC8Bise9dLJn4kxt/JtgkXnBfZnnq87kvQy4DEeUyX+7syEUSpznzoyCNZcD9JOHDSS5vcbAxNomjHJbxEf3TN5os"
-          "+IXa9dSP4HfanBhn/EUhw6D5/Z0MZiLnLwOZX4n3ec/wVexnzbH3fJr6swXujvi/0n/0nOM9D+VUTJaTUFSfxpM4EWZik1qE"
-          "7lEcTeWsbwru+z18OPZzv29Okcsw49+P5yIM7TmzOJ4BLuagCz8XqfRDHsCveMZP9d/DUKT5MX1HCFWURSB5nLyL59FdAetn"
-          "MrsBfqSCZ3IWyWjGf/DTUz/Zfv4Y/h0mN5sXqDMN/3l6YubexHkoo/c4HMNoJDJ+LLPEzydzkWZrZoV+EU3maybcyXx+hFJW"
-          "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"
-          )
-          with zipfile.ZipFile(io.BytesIO(data)) as z:
-              z.extractall('.hail-identity-feature')
-          PY
+
+          url = ('https://raw.githubusercontent.com/DeanWinchesterrr/Hail/'
+                 'adac8a98be918793a04f0fa00ba56aba66fcf3fb/'
+                 '.github/workflows/hail-app-manager.yml')
+          source = urllib.request.urlopen(url, timeout=60).read().decode('utf-8')
+          match = re.search(r'data = base64\.b64decode\(\s*((?:"[A-Za-z0-9+/=]+"\s*)+)\)', source)
+          if not match:
+              raise RuntimeError('Embedded identity patch not found in pinned commit')
+          encoded = ''.join(re.findall(r'"([A-Za-z0-9+/=]+)"', match.group(1)))
+          patch = base64.b64decode(encoded, validate=True)
+          expected = 'ecb95b13925b2fdad4ca74b7640c9952761d401a615f7e33efa0f5c7b770cffb'
+          if hashlib.sha256(patch).hexdigest() != expected:
+              raise RuntimeError('Identity patch checksum mismatch')
+          out = Path('.hail-identity-feature').resolve()
+          with zipfile.ZipFile(io.BytesIO(patch)) as archive:
+              for member in archive.namelist():
+                  target = (out / member).resolve()
+                  if not target.is_relative_to(out):
+                      raise RuntimeError('Unsafe path in identity patch archive')
+              archive.extractall(out)
+          print('Verified identity patch from pinned source commit')
+          PYINNER
+
           python3 .hail-identity-feature/apply_feature.py .
+
+          # Magisk v30.7 GPL-3.0 signing components
           MAGISK_BASE="https://raw.githubusercontent.com/topjohnwu/Magisk/v30.7/app/core/src/main/java/com/topjohnwu/magisk"
           SIGNING_DIR="app/src/main/java/com/topjohnwu/magisk/core/signing"
           AXML_DIR="app/src/main/kotlin/com/topjohnwu/magisk/core/utils"
           mkdir -p "$SIGNING_DIR" "$AXML_DIR"
+
           for source in ApkSignerV2 ByteArrayStream JarMap SignApk ZipUtils; do
             curl --fail --location --retry 3 --silent --show-error \
               "$MAGISK_BASE/core/signing/$source.java" \
               --output "$SIGNING_DIR/$source.java"
           done
+
           curl --fail --location --retry 3 --silent --show-error \
             "$MAGISK_BASE/core/utils/AXML.kt" \
             --output "$AXML_DIR/AXML.kt"
-          # Magisk v30.7's signer aligns stored .so files at 4096 bytes.
-          # Android 15+ devices can require 16384-byte alignment.
-          python3 - <<'PY'
+
+          python3 - <<'PYINNER'
           from pathlib import Path
           p = Path('app/src/main/java/com/topjohnwu/magisk/core/signing/SignApk.java')
           s = p.read_text()
-          needle = 'return 4096;'
-          assert s.count(needle) == 1, 'Magisk signing helper changed: check .so alignment'
-          p.write_text(s.replace(needle, 'return 16384;'))
-          PY
-          echo 'Hail migration feature and Magisk GPL-3.0 signer installed'
+          assert s.count('return 4096;') == 1, 'Check Magisk signer alignment'
+          p.write_text(s.replace('return 4096;', 'return 16384;'))
+          PYINNER
+
+          echo 'Hail identity-switch feature installed'
 
       - name: Compile release APK
         run: |
@@ -295,3 +206,27 @@ jobs:
 
       - name: Verify APK application ID and signature
         run: |
+          set -eu
+          apk_file=$(find app/build/outputs/apk/release -maxdepth 1 -name '*.apk' -print -quit)
+          test -n "$apk_file"
+          expected=$(python3 -c "import json; print(json.load(open('hail-build-identity.json'))['package_id'])")
+          aapt_bin=$(find "$ANDROID_HOME/build-tools" -maxdepth 2 -type f -name aapt | sort -V | tail -n 1)
+          signer=$(find "$ANDROID_HOME/build-tools" -maxdepth 2 -type f -name apksigner | sort -V | tail -n 1)
+          test -n "$aapt_bin"
+          test -n "$signer"
+          actual=$("$aapt_bin" dump badging "$apk_file" | sed -n "s/^package: name='\([^']*\)'.*/\1/p" | head -n 1)
+          printf 'Expected: %s\nActual: %s\n' "$expected" "$actual"
+          test "$actual" = "$expected"
+          "$signer" verify "$apk_file"
+          echo 'Signed APK verified'
+
+      - name: Upload installable APK and identity record
+        uses: actions/upload-artifact@v4
+        with:
+          name: Hail-in-app-identity-APK
+          path: |
+            app/build/outputs/apk/release/*.apk
+            hail-build-identity.json
+          if-no-files-found: error
+          retention-days: 14
+        
