@@ -43,8 +43,15 @@ jobs:
           distribution: temurin
           java-version: '21'
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+      - name: Install Android SDK 36
+        shell: bash
+        run: |
+          set -euo pipefail
+          sdk_root="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          sdkmanager_bin="$(find "$sdk_root/cmdline-tools" -type f -path '*/bin/sdkmanager' | sort -V | tail -n 1)"
+          test -x "$sdkmanager_bin" || { echo 'Android SDK command-line tools not found'; exit 1; }
+          yes | "$sdkmanager_bin" --sdk_root="$sdk_root" --licenses > /dev/null || true
+          "$sdkmanager_bin" --sdk_root="$sdk_root" --install "platforms;android-36" "build-tools;36.0.0"
 
       - name: Generate application identity
         env:
