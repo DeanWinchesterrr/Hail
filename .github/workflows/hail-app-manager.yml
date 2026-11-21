@@ -1,0 +1,155 @@
+name: Build Hail App Manager APK
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      identity_mode:
+        description: 'Choose a fresh random package ID or use your own'
+        required: true
+        type: choice
+        options:
+          - random
+          - custom
+        default: random
+      custom_package:
+        description: 'Only used when identity_mode is custom (e.g. com.tools.myapp)'
+        type: string
+        required: false
+        default: ''
+      app_name:
+        description: 'Name displayed under the icon'
+        type: string
+        required: true
+        default: 'App Manager'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Generate identity and build signed APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out fork
+        uses: actions/checkout@v4
+
+      - name: Set up Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Generate application identity
+        env:
+          HAIL_IDENTITY_MODE: ${{ inputs.identity_mode }}
+          HAIL_CUSTOM_PACKAGE: ${{ inputs.custom_package }}
+          HAIL_APP_NAME: ${{ inputs.app_name }}
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import os
+          import re
+          import secrets
+          import string
+          import json
+          from xml.sax.saxutils import escape
+
+          app_name = os.environ['HAIL_APP_NAME'].strip() or 'App Manager'
+          mode = os.environ['HAIL_IDENTITY_MODE'].strip() or 'random'
+          custom = os.environ['HAIL_CUSTOM_PACKAGE'].strip()
+          if not re.fullmatch(r'[A-Za-z0-9 ._-]{1,32}', app_name):
+              raise SystemExit('App name: use 1-32 alphanumeric/basic punctuation characters')
+
+          def segment(length):
+              alphabet = string.ascii_lowercase + string.digits
+              return secrets.choice(string.ascii_lowercase) + ''.join(
+                  secrets.choice(alphabet) for _ in range(length - 1)
+              )
+
+          if mode == 'random':
+              package_id = f'com.{segment(12)}.{segment(12)}'
+          elif mode == 'custom':
+              package_id = custom
+          else:
+              raise SystemExit('Unknown identity mode')
+
+          if not re.fullmatch(r'[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+', package_id):
+              raise SystemExit('Android application ID must be lowercase dot-separated identifiers')
+          if package_id == 'com.aistra.hail':
+              raise SystemExit('Refusing to use official Hail package ID')
+
+          build_file = Path('app/build.gradle.kts')
+          before = build_file.read_text(encoding='utf-8')
+          after, count = re.subn(
+              r'(?m)^(\s*applicationId\s*=\s*)"com\.aistra\.hail"(\s*)$',
+              lambda m: m.group(1) + '"' + package_id + '"' + m.group(2),
+              before,
+          )
+          if count != 1:
+              raise SystemExit('Hail source structure changed: applicationId not found exactly once')
+          build_file.write_text(after, encoding='utf-8')
+
+          changed = 0
+          for path in sorted(Path('app/src/main/res').glob('values*/strings.xml')):
+              before = path.read_text(encoding='utf-8')
+              after, n = re.subn(
+                  r'(<string\s+name="app_name"\s*>)(.*?)(</string>)',
+                  lambda m: m.group(1) + escape(app_name) + m.group(3),
+                  before,
+                  flags=re.DOTALL,
+              )
+              if n:
+                  path.write_text(after, encoding='utf-8')
+                  changed += n
+          if changed == 0:
+              raise SystemExit('No app_name resource could be updated')
+
+          details = {'app_name': app_name, 'package_id': package_id, 'mode': mode,
+                     'note': 'New package creates a separate app; data is not migrated.'}
+          Path('hail-build-identity.json').write_text(
+              json.dumps(details, indent=2) + '\n', encoding='utf-8'
+          )
+          print('Application name:', app_name)
+          print('Installed package:', package_id)
+          print('Changed localized label resources:', changed)
+          print('Source Kotlin namespace deliberately unchanged for compatibility')
+          PY
+
+      - name: Compile release APK
+        run: |
+          chmod +x gradlew
+          ./gradlew --no-daemon :app:assembleRelease
+
+      - name: Verify APK application ID and signature
+        run: |
+          set -eu
+          apk_file=$(find app/build/outputs/apk/release -maxdepth 1 -name '*.apk' -print -quit)
+          test -n "$apk_file"
+          expected=$(python3 -c "import json; print(json.load(open('hail-build-identity.json'))['package_id'])")
+          aapt_bin=$(find "$ANDROID_HOME/build-tools" -maxdepth 2 -type f -name aapt | sort -V | tail -n 1)
+          signer=$(find "$ANDROID_HOME/build-tools" -maxdepth 2 -type f -name apksigner | sort -V | tail -n 1)
+          test -n "$aapt_bin"
+          test -n "$signer"
+          actual=$("$aapt_bin" dump badging "$apk_file" | sed -n "s/^package: name='\([^']*\)'.*/\1/p" | head -n 1)
+          printf 'Expected: %s\nActual: %s\n' "$expected" "$actual"
+          test "$actual" = "$expected"
+          "$signer" verify "$apk_file"
+          echo 'Signed APK verified'
+
+      - name: Upload installable APK and identity record
+        uses: actions/upload-artifact@v4
+        with:
+          name: Hail-randomized-build
+          path: |
+            app/build/outputs/apk/release/*.apk
+            hail-build-identity.json
+          if-no-files-found: error
+          retention-days: 14
+          
